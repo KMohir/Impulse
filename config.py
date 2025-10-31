@@ -8,7 +8,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
 # Язык ответов (используется в приветствии и подсказках)
-BOT_LANGUAGE = os.getenv('BOT_LANGUAGE', 'ru')
+BOT_LANGUAGE = os.getenv('BOT_LANGUAGE', 'uz')
 
 # Настройки STT (Muxlisa)
 MUXLISA_STT_URL = os.getenv('MUXLISA_STT_URL', 'https://service.muxlisa.uz/api/v2/stt')
