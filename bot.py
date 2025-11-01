@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-PROJECT_ROOT = "/home/mohirbek/Projects/Impulse"
+PROJECT_ROOT = "/app"
 CHUNK_DURATION = 48  # секунд
 
 
