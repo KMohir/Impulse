@@ -10,7 +10,7 @@ import requests
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -26,6 +26,7 @@ class UserStates(StatesGroup):
     waiting_for_audio = State()
     processing_audio = State()
     waiting_for_chatgpt = State()
+    waiting_for_choice = State()  # Ожидание выбора: новый контент план или новое аудио
 
 # Initialize bot with FSM storage
 storage = MemoryStorage()
@@ -35,9 +36,26 @@ dp = Dispatcher(storage=storage)
 # OpenAI client
 openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
 
-PROJECT_ROOT = "/app"
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+AUDIO_STORAGE_DIR = os.path.join(PROJECT_ROOT, "audio_storage")  # Папка для постоянного хранения
 CHUNK_DURATION = 48  # секунд
 MAX_FILE_SIZE_MB = 20  # Telegram API limit for getFile
+
+# Создаем папку для хранения аудио и текстов при запуске
+os.makedirs(AUDIO_STORAGE_DIR, exist_ok=True)
+
+
+def _get_action_keyboard() -> InlineKeyboardMarkup:
+    """Создает инлайн клавиатуру с действиями после получения контент плана"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔄 Yangi kontent plan", callback_data="new_content_plan")
+        ],
+        [
+            InlineKeyboardButton(text="🎤 Audio tashlash", callback_data="new_audio")
+        ]
+    ])
+    return keyboard
 
 
 def _get_audio_duration(file_path: str) -> float:
@@ -262,8 +280,8 @@ async def handle_audio_message(message: Message, state: FSMContext):
         src_ext = os.path.splitext(tg_file.file_path or "")[1] or ".ogg"
         rnd = uuid.uuid4().hex
         
-        # Создаем уникальную временную папку для каждого аудио
-        temp_dir = os.path.join(PROJECT_ROOT, f"temp_audio_{rnd}")
+        # Создаем уникальную папку для каждого аудио в постоянном хранилище
+        temp_dir = os.path.join(AUDIO_STORAGE_DIR, f"audio_{rnd}")
         os.makedirs(temp_dir, exist_ok=True)
         
         src_path = os.path.join(temp_dir, f"original{src_ext}")
@@ -301,6 +319,15 @@ async def handle_audio_message(message: Message, state: FSMContext):
             await message.answer("Tanish natijasi bo'sh. Yana urinib ko'ring.")
             await state.set_state(UserStates.waiting_for_audio)
         else:
+            # Сохраняем распознанный текст в файл
+            text_file_path = os.path.join(temp_dir, "stt_text.txt")
+            try:
+                with open(text_file_path, "w", encoding="utf-8") as text_file:
+                    text_file.write(combined_text)
+                logger.info(f"STT текст сохранен в: {text_file_path}")
+            except Exception as e:
+                logger.error(f"Ошибка при сохранении текста: {e}")
+            
             # Сохраняем текст в FSM
             await state.update_data(stt_text=combined_text)
             await state.set_state(UserStates.waiting_for_chatgpt)
@@ -353,8 +380,11 @@ async def handle_audio_message(message: Message, state: FSMContext):
                     logger.error(f"Ошибка при отправке ответа ChatGPT {i+1}: {e}")
                     continue
             
-            await state.set_state(UserStates.waiting_for_audio)
-            await message.answer("\n✅ Tayyor! Yangi audio yuboring yoki /start bosing.")
+            await state.set_state(UserStates.waiting_for_choice)
+            await message.answer(
+                "\n✅ Tayyor! Quyidagi harakatlardan birini tanlang:",
+                reply_markup=_get_action_keyboard()
+            )
             
     except TelegramBadRequest as e:
         if "file is too big" in str(e):
@@ -380,13 +410,76 @@ async def handle_audio_message(message: Message, state: FSMContext):
         except Exception as send_error:
             logger.error(f"Ошибка при отправке сообщения об ошибке: {send_error}")
     finally:
-        # Удаляем временную папку и все файлы
+        # Не удаляем папку - аудио и текст сохраняются в audio_storage
         if temp_dir and os.path.exists(temp_dir):
-            try:
-                shutil.rmtree(temp_dir)
-                logger.info(f"Удалена временная папка: {temp_dir}")
-            except Exception as e:
-                logger.error(f"Ошибка при удалении папки {temp_dir}: {e}")
+            logger.info(f"Аудио и текст сохранены в: {temp_dir}")
+
+
+@dp.callback_query(F.data == "new_content_plan")
+async def handle_new_content_plan(callback: CallbackQuery, state: FSMContext):
+    """Обработчик для кнопки 'Yangi kontent plan' - генерирует новый контент план с тем же STT текстом"""
+    await callback.answer()
+    
+    # Получаем сохраненный STT текст из FSM
+    data = await state.get_data()
+    stt_text = data.get("stt_text")
+    
+    if not stt_text:
+        await callback.message.answer("❌ STT tekst topilmadi. Iltimos, yangi audio yuboring.")
+        await state.set_state(UserStates.waiting_for_audio)
+        return
+    
+    await callback.message.answer("🤖 Yangi kontent plan tayyorlanmoqda...")
+    await bot.send_chat_action(callback.message.chat.id, "typing")
+    
+    # Используем тот же промпт
+    user_prompt = (
+        "Sen — tajribali brend-strateg, ssenarist va motivatsion kontent prodyusersan. "
+        "Yuqoridagi mijozning matni asosida 15 ta qisqa motivatsion video skript tayyorla. "
+        "Har bir skript quyidagi qat'iy tuzilma bo'yicha bo'lsin va aniq ajratib yozilsin:\n\n"
+        "Sarlavha: (motivatsion, esda qoladigan nom — 3–6 so'z)\n"
+        "🎯 Hook: (birinchi 3 soniyada e'tibor tortadigan 1–2 jumla; kuchli boshlanish)\n"
+        "💡 Kontent g'oyasi: (video nimani o'rgatadi yoki qanday hissiyot uyg'otadi — 1–2 jumla)\n"
+        "🗣 Skript (100–120 so'z): (samimiy \"sen\" murojaatida, motivatsion va tabiiy ovozda; "
+        "kamera qarshisida aytilishga mos; har bir skript 100–120 so'z orasida bo'lsin)\n\n"
+        "Qo'shimcha talablar:\n"
+        "- Til: o'zbekcha (lotin alifbosida)\n"
+        "- Ohang: motivatsion, ishonchli, tabiiy (sun'iy \"trainer\" ohangsiz)\n"
+        "- Format: javobda faqat 15 ta blok bo'lsin — hech qanday qo'shimcha izoh yoki tushuntirishsiz\n"
+        "- Har bir skript lichniy brend videoga mos (Reels / TikTok / Shorts: 40–60 soniya)\n"
+        "- Har bir hook qisqa, aniq va darhol e'tiborni tortadigan bo'lsin"
+    )
+    
+    chatgpt_response = await _send_to_chatgpt(stt_text, user_prompt)
+    
+    # Отправляем новый ответ ChatGPT
+    await callback.message.answer("\n" + "="*30 + "\n📋 YANGI KONTENT PLAN - HEYGEN SKRIPTLAR\n" + "="*30)
+    response_parts = _split_text_for_telegram(chatgpt_response)
+    for i, part in enumerate(response_parts):
+        try:
+            await callback.message.answer(part)
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Ошибка при отправке ответа ChatGPT {i+1}: {e}")
+            continue
+    
+    await state.set_state(UserStates.waiting_for_choice)
+    await callback.message.answer(
+        "\n✅ Tayyor! Quyidagi harakatlardan birini tanlang:",
+        reply_markup=_get_action_keyboard()
+    )
+
+
+@dp.callback_query(F.data == "new_audio")
+async def handle_new_audio(callback: CallbackQuery, state: FSMContext):
+    """Обработчик для кнопки 'Audio tashlash' - начинает процесс заново"""
+    await callback.answer()
+    await state.clear()  # Очищаем все данные FSM
+    await state.set_state(UserStates.waiting_for_audio)
+    await callback.message.answer(
+        "🎤 Yangi ovozli xabar yoki audio fayl yuboring.\n\n"
+        "Men uni matnga aylantirib, ChatGPT yordamida kontent plan tayyorlayman."
+    )
 
 
 @dp.message()
