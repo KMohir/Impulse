@@ -20,6 +20,12 @@ MUXLISA_STT_URL=https://service.muxlisa.uz/api/v2/stt
 # Язык интерфейса бота: ru (русский) или uz (узбекский)
 BOT_LANGUAGE=ru
 
+# ========================================
+# OPENAI (ChatGPT) CONFIGURATION
+# ========================================
+# Получите API ключ на https://platform.openai.com/api-keys
+OPENAI_API_KEY=your_openai_api_key_here
+
 # Прочее: дополнительные сервисы не требуются для STT-бота
 
 # ========================================

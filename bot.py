@@ -8,19 +8,36 @@ from typing import List, Optional
 
 import requests
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import Message
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from openai import OpenAI
 
 import config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# FSM States
+class UserStates(StatesGroup):
+    waiting_for_audio = State()
+    processing_audio = State()
+    waiting_for_chatgpt = State()
+
+# Initialize bot with FSM storage
+storage = MemoryStorage()
 bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=storage)
+
+# OpenAI client
+openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
 
 PROJECT_ROOT = "/app"
 CHUNK_DURATION = 48  # секунд
+MAX_FILE_SIZE_MB = 20  # Telegram API limit for getFile
 
 
 def _get_audio_duration(file_path: str) -> float:
@@ -171,24 +188,70 @@ def _post_to_stt(wav_path: str, filename_for_form: str) -> str:
         return ""
 
 
+async def _send_to_chatgpt(stt_text: str, user_prompt: str) -> str:
+    """Отправляет STT текст в ChatGPT с заданным промптом"""
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "Sen tajribali brend-strateg, professional ssenarist va motivatsion kontent prodyusersan. "
+                               "O'zbek tilida ajoyib video skriptlar yozasan. Har doim aniq strukturaga rioya qilasan va "
+                               "mijoz talablarini to'liq bajarasan. Faqat so'ralgan formatda javob berasan."
+                },
+                {"role": "user", "content": f"{user_prompt}\n\nMana mijoz matni (audio dan olingan):\n\n{stt_text}"}
+            ],
+            temperature=0.7,
+            max_tokens=4000
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"ChatGPT API xatoligi: {e}")
+        return f"❌ ChatGPT bilan bog'lanishda xatolik: {str(e)}"
+
+
 @dp.message(Command("start"))
-async def start_cmd(message: Message):
-    await message.answer("👋 Ovozli xabar yoki audio fayl yuboring — men matnni qaytaraman.")
+async def start_cmd(message: Message, state: FSMContext):
+    await state.set_state(UserStates.waiting_for_audio)
+    await message.answer(
+        "👋 Ovozli xabar yoki audio fayl yuboring — men:\n"
+        "1. Matnni qaytaraman\n"
+        "2. ChatGPT yordamida kontent plan tayyorlayman\n"
+        "3. HeyGen uchun tayyor skript formatida 15 ta video skriptini taqdim etaman"
+    )
 
 
 @dp.message(F.voice | F.audio)
-async def handle_audio_message(message: Message):
+async def handle_audio_message(message: Message, state: FSMContext):
+    await state.set_state(UserStates.processing_audio)
     await bot.send_chat_action(message.chat.id, "typing")
 
     file_id: Optional[str] = None
+    file_size: Optional[int] = None
+    
     if message.voice:
         file_id = message.voice.file_id
+        file_size = message.voice.file_size
     elif message.audio:
         file_id = message.audio.file_id
+        file_size = message.audio.file_size
 
     if not file_id:
-        await message.answer("Faylni olishning imkoni bo‘lmadi. Iltimos, yana urinib ko‘ring.")
+        await message.answer("Faylni olishning imkoni bo'lmadi. Iltimos, yana urinib ko'ring.")
         return
+
+    # Check file size before attempting to download
+    if file_size:
+        file_size_mb = file_size / (1024 * 1024)
+        if file_size_mb > MAX_FILE_SIZE_MB:
+            await message.answer(
+                f"❌ Audio fayl juda katta ({file_size_mb:.1f} MB).\n"
+                f"Telegram API cheklovi: {MAX_FILE_SIZE_MB} MB.\n"
+                f"Iltimos, qisqaroq yoki kichikroq fayl yuboring."
+            )
+            logger.warning(f"File too large: {file_size_mb:.1f} MB (limit: {MAX_FILE_SIZE_MB} MB)")
+            return
 
     # Создаем временную папку для этого аудио
     temp_dir = None
@@ -235,28 +298,85 @@ async def handle_audio_message(message: Message):
         combined_text = " ".join(all_texts)
         
         if not combined_text:
-            await message.answer("Tanish natijasi bo‘sh. Yana urinib ko‘ring.")
+            await message.answer("Tanish natijasi bo'sh. Yana urinib ko'ring.")
+            await state.set_state(UserStates.waiting_for_audio)
         else:
-            # Разбиваем длинный текст на части и отправляем отдельными сообщениями
+            # Сохраняем текст в FSM
+            await state.update_data(stt_text=combined_text)
+            await state.set_state(UserStates.waiting_for_chatgpt)
+            
+            # Отправляем распознанный текст пользователю
+            await message.answer("📝 Tanish natijalari:\n" + "="*30)
             text_parts = _split_text_for_telegram(combined_text)
             for i, part in enumerate(text_parts):
                 try:
                     if i == 0:
                         await message.answer(part)
                     else:
-                        # Добавляем заголовок для продолжения
                         await message.answer(f"[{i+1}/{len(text_parts)}] {part}")
-                    # Небольшая задержка между сообщениями, чтобы избежать rate limit
                     await asyncio.sleep(0.5)
                 except Exception as e:
                     logger.error(f"Ошибка при отправке части текста {i+1}: {e}")
-                    # Пробуем отправить следующую часть
                     continue
             
+            # Отправляем в ChatGPT с промптом
+            await message.answer("\n🤖 ChatGPT bilan kontent plan tayyorlanmoqda...")
+            await bot.send_chat_action(message.chat.id, "typing")
+            
+            user_prompt = (
+                "Sen — tajribali brend-strateg, ssenarist va motivatsion kontent prodyusersan. "
+                "Yuqoridagi mijozning matni asosida 15 ta qisqa motivatsion video skript tayyorla. "
+                "Har bir skript quyidagi qat'iy tuzilma bo'yicha bo'lsin va aniq ajratib yozilsin:\n\n"
+                "Sarlavha: (motivatsion, esda qoladigan nom — 3–6 so'z)\n"
+                "🎯 Hook: (birinchi 3 soniyada e'tibor tortadigan 1–2 jumla; kuchli boshlanish)\n"
+                "💡 Kontent g'oyasi: (video nimani o'rgatadi yoki qanday hissiyot uyg'otadi — 1–2 jumla)\n"
+                "🗣 Skript (100–120 so'z): (samimiy \"sen\" murojaatida, motivatsion va tabiiy ovozda; "
+                "kamera qarshisida aytilishga mos; har bir skript 100–120 so'z orasida bo'lsin)\n\n"
+                "Qo'shimcha talablar:\n"
+                "- Til: o'zbekcha (lotin alifbosida)\n"
+                "- Ohang: motivatsion, ishonchli, tabiiy (sun'iy \"trainer\" ohangsiz)\n"
+                "- Format: javobda faqat 15 ta blok bo'lsin — hech qanday qo'shimcha izoh yoki tushuntirishsiz\n"
+                "- Har bir skript lichniy brend videoga mos (Reels / TikTok / Shorts: 40–60 soniya)\n"
+                "- Har bir hook qisqa, aniq va darhol e'tiborni tortadigan bo'lsin"
+            )
+            
+            chatgpt_response = await _send_to_chatgpt(combined_text, user_prompt)
+            
+            # Отправляем ответ ChatGPT
+            await message.answer("\n" + "="*30 + "\n📋 KONTENT PLAN - HEYGEN SKRIPTLAR\n" + "="*30)
+            response_parts = _split_text_for_telegram(chatgpt_response)
+            for i, part in enumerate(response_parts):
+                try:
+                    await message.answer(part)
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    logger.error(f"Ошибка при отправке ответа ChatGPT {i+1}: {e}")
+                    continue
+            
+            await state.set_state(UserStates.waiting_for_audio)
+            await message.answer("\n✅ Tayyor! Yangi audio yuboring yoki /start bosing.")
+            
+    except TelegramBadRequest as e:
+        if "file is too big" in str(e):
+            logger.error(f"STT error: {e}")
+            try:
+                await message.answer(
+                    f"❌ Audio fayl juda katta.\n"
+                    f"Telegram API cheklovi: {MAX_FILE_SIZE_MB} MB.\n"
+                    f"Iltimos, qisqaroq yoki kichikroq fayl yuboring."
+                )
+            except Exception as send_error:
+                logger.error(f"Ошибка при отправке сообщения об ошибке: {send_error}")
+        else:
+            logger.error(f"Telegram API error: {e}", exc_info=True)
+            try:
+                await message.answer("Telegram API xatoligi yuz berdi. Iltimos, yana urinib ko'ring.")
+            except Exception as send_error:
+                logger.error(f"Ошибка при отправке сообщения об ошибке: {send_error}")
     except Exception as e:
         logger.error(f"STT error: {e}", exc_info=True)
         try:
-            await message.answer("Audio qayta ishlashda xatolik yuz berdi. Tizimda ffmpeg va ffprobe o‘rnatilganini tekshiring.")
+            await message.answer("Audio qayta ishlashda xatolik yuz berdi. Tizimda ffmpeg va ffprobe o'rnatilganini tekshiring.")
         except Exception as send_error:
             logger.error(f"Ошибка при отправке сообщения об ошибке: {send_error}")
     finally:
@@ -270,8 +390,11 @@ async def handle_audio_message(message: Message):
 
 
 @dp.message()
-async def default_message(message: Message):
-    await message.answer("Ovozli xabar yoki audio fayl yuboring. Men uni matnga aylantirib beraman.")
+async def default_message(message: Message, state: FSMContext):
+    await message.answer(
+        "Ovozli xabar yoki audio fayl yuboring. Men uni matnga aylantirib, "
+        "ChatGPT yordamida kontent plan tayyorlayman."
+    )
 
 
 async def main():
