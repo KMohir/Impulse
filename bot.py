@@ -29,6 +29,7 @@ class UserStates(StatesGroup):
     waiting_for_tajriba = State()
     waiting_for_mavzular = State()
     waiting_for_unique = State()
+    waiting_for_selection = State()
 
 # Initialize bot with FSM storage
 storage = MemoryStorage()
@@ -225,6 +226,9 @@ async def process_unique(message: Message, state: FSMContext):
 
     response_text = await _send_to_chatgpt(prompt)
     
+    # Save the response for refinement
+    await state.update_data(last_response=response_text)
+    
     # Split and send response
     response_parts = _split_text_for_telegram(response_text)
     for i, part in enumerate(response_parts):
@@ -235,9 +239,77 @@ async def process_unique(message: Message, state: FSMContext):
             logger.error(f"Error sending part {i+1}: {e}")
             continue
 
-    # Optional: Offer to restart or do something else
-    await message.answer("\nBoshqa soha bo'yicha reja tuzamizmi? /start ni bosing.")
-    await state.clear()
+    await state.set_state(UserStates.waiting_for_selection)
+    await message.answer(
+        "\n♻️ <b>Qaysi mavzular sizga yoqdi?</b>\n\n"
+        "Yoqqan mavzular raqamini yozing (masalan: 1, 5, 10).\n"
+        "Men ularni saqlab qolaman va qolganlarini yangisiga almashtirib beraman.\n\n"
+        "Yoki yangi soha tanlash uchun /start ni bosing."
+    )
+
+
+@dp.message(UserStates.waiting_for_selection)
+async def process_selection(message: Message, state: FSMContext):
+    selected_numbers = message.text
+    data = await state.get_data()
+    
+    # Retrieve context
+    soha = data.get('soha')
+    auditoriya = data.get('auditoriya')
+    maqsad = data.get('maqsad')
+    muammolar = data.get('muammolar')
+    tasir = data.get('tasir')
+    tajriba = data.get('tajriba')
+    mavzular = data.get('mavzular')
+    unique = data.get('unique')
+    last_response = data.get('last_response')
+
+    await message.answer("⏳ <b>Qayta ishlayapman...</b>\nTanlangan mavzularni saqlab, qolganlarini yangilayapman.")
+    await bot.send_chat_action(message.chat.id, "typing")
+
+    prompt = (
+        f"Soha: {soha}\n"
+        f"Auditoriya: {auditoriya}\n"
+        f"Maqsad: {maqsad}\n"
+        f"Hal qilayotgan muammolar: {muammolar}\n"
+        f"Ta'siri: {tasir}\n"
+        f"Shaxsiy tajriba/Keyslar: {tajriba}\n"
+        f"Istalgan mavzular: {mavzular}\n"
+        f"O'ziga xoslik (USP): {unique}\n\n"
+        "--------------------------------------------------\n"
+        f"OLDINGI GENERATSIYA:\n{last_response}\n"
+        "--------------------------------------------------\n"
+        f"FOYDALANUVCHI TANLAGAN RAQAMLAR: {selected_numbers}\n\n"
+        "🎯 TOPSHIRIQ:\n"
+        "1. Foydalanuvchi tanlagan raqamdagi mavzularni (Hook va Kontent) XUDDI O'ZIDEK saqlab qoling.\n"
+        "2. Tanlanmagan mavzular o'rniga YANGI, viral va qiziqarli g'oyalar yozing.\n"
+        "3. Jami yana 15 ta kontent bo'lishi kerak.\n\n"
+        "Javobingiz qat'iy quyidagi formatda bo'lsin (har bir mavzu uchun):\n\n"
+        "🎥 Kontent {raqam}\n"
+        "<b>Hook:</b> [Videoni boshlash uchun 3 soniyalik kuchli ilmoq/gap]\n"
+        "<b>Kontent:</b> [Video nima haqida bo'lishi, vizual tavsif va g'oya]\n\n"
+        "Barcha javoblar O'zbek tilida bo'lsin."
+    )
+
+    response_text = await _send_to_chatgpt(prompt)
+    
+    # Update last response
+    await state.update_data(last_response=response_text)
+
+    # Split and send response
+    response_parts = _split_text_for_telegram(response_text)
+    for i, part in enumerate(response_parts):
+        try:
+            await message.answer(part)
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Error sending part {i+1}: {e}")
+            continue
+            
+    await message.answer(
+        "\n♻️ <b>Yana o'zgartiramizmi?</b>\n"
+        "Yoqqanlarini raqamini yozing (masalan: 1, 2, 3) yoki yangi soha uchun /start ni bosing."
+    )
 
 
 @dp.message()
