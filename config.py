@@ -13,9 +13,19 @@ BOT_LANGUAGE = os.getenv('BOT_LANGUAGE', 'uz')
 # OpenAI API настройки
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
+# Настройки STT (Muxlisa)
+MUXLISA_STT_URL = os.getenv('MUXLISA_STT_URL', 'https://service.muxlisa.uz/api/v2/stt')
+MUXLISA_API_KEY = os.getenv('MUXLISA_API_KEY')
+
+# HeyGen API настройки
+HEYGEN_API_KEY = os.getenv('HEYGEN_API_KEY')
+
 # Проверка наличия необходимых переменных
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN не найден в переменных окружения")
 
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY не найден в переменных окружения")
+
+if not MUXLISA_API_KEY:
+    raise ValueError("MUXLISA_API_KEY не найден в переменных окружения")

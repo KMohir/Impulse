@@ -76,6 +76,29 @@ class HeyGenVideoCreator:
             if hasattr(e.response, 'text'):
                 print(f"Детали ошибки: {e.response.text}")
             return None
+
+    def get_avatars(self):
+        """
+        Получить список доступных аватаров
+        
+        Returns:
+            list: Список аватаров или None при ошибке
+        """
+        url = "https://api.heygen.com/v2/avatars"
+        
+        try:
+            response = requests.get(
+                url,
+                headers=self.headers
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get('data', {}).get('avatars', [])
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Ошибка при получении аватаров: {e}")
+            if hasattr(e.response, 'text'):
+                print(f"Детали ошибки: {e.response.text}")
+            return None
     
     def check_video_status(self, video_id):
         """

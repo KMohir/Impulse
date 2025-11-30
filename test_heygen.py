@@ -114,10 +114,45 @@ def test_heygen():
             print(f"❗ Ошибка: {error}")
         print("=" * 60)
 
+def test_avatars():
+    """Тест получения аватаров"""
+    api_key = os.getenv('HEYGEN_API_KEY')
+    if not api_key:
+        print("❌ HEYGEN_API_KEY не найден!")
+        return
+
+    print("=" * 60)
+    print("👤 ТЕСТ ПОЛУЧЕНИЯ АВАТАРОВ")
+    print("=" * 60)
+    
+    creator = HeyGenVideoCreator(api_key)
+    avatars = creator.get_avatars()
+    
+    if avatars:
+        print(f"✅ Получено {len(avatars)} аватаров")
+        print("\nПервые 5 аватаров:")
+        for i, av in enumerate(avatars[:5]):
+            print(f"{i+1}. {av.get('name')} (ID: {av.get('avatar_id')})")
+    else:
+        print("❌ Не удалось получить список аватаров")
+    print("=" * 60)
+
+import sys
 
 if __name__ == "__main__":
     try:
-        test_heygen()
+        if len(sys.argv) > 1 and sys.argv[1] == "avatars":
+            test_avatars()
+        else:
+            print("1. Тест создания видео")
+            print("2. Тест получения аватаров")
+            choice = input("Выбор (1/2): ").strip()
+            
+            if choice == "2":
+                test_avatars()
+            else:
+                test_heygen()
+            
     except KeyboardInterrupt:
         print("\n\n⚠️ Прервано пользователем")
     except Exception as e:
